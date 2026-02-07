@@ -1,16 +1,21 @@
-
-import subprocess
 import os
+import subprocess
 import time
-from config_tv import TV_IP, KEY, WAKE_ACTIVITY
+from config_tv import TV_IP, KEY
 
 LOG_FILE = os.path.join(os.path.expanduser("~"), "scripts/tv/_tv.log")
 if os.path.exists("/config"):
     LOG_FILE = "/config/_tv.log"
 
-TV_STATE = "off"
+TV_STATES = {
+    "OFF": "off",
+    "AWAKE": "awake",
+    "SCREENSAVER": "screensaver",
+    "SLEEP": "sleep",  # reserved for future implementation
+    "UNKNOWN": "unknown",
+}
 
-# ----------------- Логирование -----------------
+
 def log(msg, level="INFO"):
     ts = time.strftime("%Y-%m-%d %H:%M:%S")
     line = f"{ts} [{level}] {msg}\n"
@@ -21,7 +26,7 @@ def log(msg, level="INFO"):
         pass
     print(line, end="")
 
-# ----------------- ADB -----------------
+
 def adb(cmd, check=True, timeout=8):
     if isinstance(cmd, str):
         cmd = cmd.split()
@@ -34,7 +39,8 @@ def adb(cmd, check=True, timeout=8):
             raise RuntimeError("ADB failed")
     return r.returncode, r.stdout.strip()
 
-def isOnlineTV(timeout=0.5):
+
+def is_online_tv(timeout=1):
     try:
         subprocess.run(
             ["ping", "-c", "1", "-W", str(timeout), TV_IP],
@@ -46,66 +52,104 @@ def isOnlineTV(timeout=0.5):
     except subprocess.CalledProcessError:
         return False
 
+
 def run_wol_tv():
-    """Отправка WOL для включения ТВ"""
     try:
         subprocess.run(["python3", "/home/pi/scripts/wol.py", "tv"], check=True)
         log("WOL sent to TV")
     except subprocess.CalledProcessError:
         log("Failed to send WOL to TV", level="ERROR")
 
-def ensure_connected(timeout_total=15, interval=1):
-    """Ping → WOL → ожидание ADB"""
-    start_time = time.time()
 
-    # Шаг 1: Ждём online по ping
-    while time.time() - start_time < timeout_total:
-        if isOnlineTV(timeout=0.5):
-            log("TV ping successful")
-            break
-        else:
-            log("TV offline, sending WOL", level="WARN")
-            run_wol_tv()
-            time.sleep(5)
-    else:
-        log("TV did not respond to ping in time", level="ERROR")
-        return False
-
-    # Шаг 2: Подключаемся через ADB
-    while time.time() - start_time < timeout_total:
-        try:
-            adb(f"connect {TV_IP}:5555", check=False)
-            rc, out = adb("get-state", check=False)
-            if rc == 0 and out.strip() == "device":
-                log("ADB connection ready")
-                return True
-        except Exception as e:
-            log(f"ADB not ready: {e}", level="WARN")
+def ensure_adb_connected(timeout_total=10, interval=1):
+    start = time.time()
+    while time.time() - start < timeout_total:
+        adb(f"connect {TV_IP}:5555", check=False)
+        rc, out = adb("get-state", check=False)
+        if rc == 0 and out.strip() == "device":
+            return True
         time.sleep(interval)
-
-    log("ADB not ready within timeout", level="ERROR")
     return False
 
-def is_awake():
+
+def power_service_state():
     rc, out = adb("shell dumpsys power", check=False)
-    return rc == 0 and "Awake" in out
+    if rc != 0:
+        return TV_STATES["UNKNOWN"]
+
+    low = out.lower()
+    if "display power: state=off" in low:
+        return TV_STATES["SCREENSAVER"]
+    if "display power: state=on" in low or "awake" in out:
+        return TV_STATES["AWAKE"]
+    return TV_STATES["UNKNOWN"]
+
+
+def detect_tv_state(non_intrusive=True):
+    """
+    non_intrusive=True: no WOL, only observation.
+    NOTE: sleep state is reserved and will be introduced later.
+    """
+    if not is_online_tv():
+        return TV_STATES["OFF"]
+
+    if not ensure_adb_connected(timeout_total=6, interval=1):
+        return TV_STATES["UNKNOWN"]
+
+    return power_service_state()
+
 
 def wake_up():
-    if not is_awake():
-        adb(f"shell input keyevent {KEY['WAKEUP']}")
-        wait_activity(WAKE_ACTIVITY, 15)
+    adb(f"shell input keyevent {KEY['WAKEUP']}")
 
-# ----------------- Управление состоянием TV -----------------
+
+def ensure_ready_for_command():
+    """
+    Prepare TV for interactive command execution.
+    OFF -> send WOL, then connect and WAKEUP.
+    SCREENSAVER -> send WAKEUP only.
+    AWAKE -> no-op.
+    SLEEP -> reserved for future handling.
+    """
+    state = detect_tv_state(non_intrusive=True)
+    log(f"Detected TV state: {state}")
+
+    if state == TV_STATES["OFF"]:
+        log("TV is OFF: sending WOL", level="WARN")
+        run_wol_tv()
+        time.sleep(5)
+        if not is_online_tv() or not ensure_adb_connected(timeout_total=15, interval=1):
+            log("TV is still unreachable after WOL", level="ERROR")
+            return False
+        wake_up()
+        return True
+
+    if state == TV_STATES["SCREENSAVER"]:
+        log("TV in screensaver: sending WAKEUP")
+        wake_up()
+        return True
+
+    if state == TV_STATES["AWAKE"]:
+        return True
+
+    if state == TV_STATES["SLEEP"]:
+        # Placeholder: sleep detection/handling will be added in next architecture upgrade.
+        log("Sleep state handling is not implemented yet", level="WARN")
+        return False
+
+    log("TV state is UNKNOWN; command execution canceled", level="ERROR")
+    return False
+
+
 def get_state():
-    global TV_STATE
-    try:
-        TV_STATE = "on" if ensure_connected() and adb("shell dumpsys power", check=False)[1].find("Awake") != -1 else "off"
-    except Exception as e:
-        log(f"Failed to get TV state: {e}", level="ERROR")
-        TV_STATE = "off"
-    return TV_STATE
+    return detect_tv_state(non_intrusive=True)
 
-def set_state(state):
-    global TV_STATE
-    TV_STATE = state
-    log(f"TV_STATE set to {TV_STATE}")
+
+def set_state(_state):
+    """Deprecated compatibility layer. State is derived dynamically."""
+    log("set_state() ignored: state is now detected dynamically", level="WARN")
+
+
+def wait_activity(*_args, **_kwargs):
+    """Legacy placeholder: activity-waiting flow kept for future refactoring."""
+    log("wait_activity() is deprecated and intentionally not used", level="WARN")
