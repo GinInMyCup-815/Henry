@@ -40,6 +40,20 @@ def adb(cmd, check=True, timeout=8):
     return r.returncode, r.stdout.strip()
 
 
+def adb_host(cmd, check=True, timeout=8):
+    """Run host-level adb command (without device selector), e.g. `adb connect`."""
+    if isinstance(cmd, str):
+        cmd = cmd.split()
+    full = ["adb"] + cmd
+    log(f"ADB HOST CMD: {' '.join(full)}")
+    r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    if r.returncode != 0:
+        log(r.stderr.strip(), level="ERROR")
+        if check:
+            raise RuntimeError("ADB host command failed")
+    return r.returncode, r.stdout.strip()
+
+
 def is_online_tv(timeout=1):
     try:
         subprocess.run(
@@ -64,7 +78,7 @@ def run_wol_tv():
 def ensure_adb_connected(timeout_total=10, interval=1):
     start = time.time()
     while time.time() - start < timeout_total:
-        adb(f"connect {TV_IP}:5555", check=False)
+        adb_host(f"connect {TV_IP}:5555", check=False)
         rc, out = adb("get-state", check=False)
         if rc == 0 and out.strip() == "device":
             return True
