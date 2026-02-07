@@ -32,7 +32,14 @@ def adb(cmd, check=True, timeout=8):
         cmd = cmd.split()
     full = ["adb", "-s", f"{TV_IP}:5555"] + cmd
     log(f"ADB CMD: {' '.join(full)}")
-    r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"ADB command timeout after {timeout}s", level="WARN")
+        if check:
+            raise RuntimeError("ADB command timed out")
+        return 124, ""
+
     if r.returncode != 0:
         log(r.stderr.strip(), level="ERROR")
         if check:
@@ -46,7 +53,14 @@ def adb_host(cmd, check=True, timeout=8):
         cmd = cmd.split()
     full = ["adb"] + cmd
     log(f"ADB HOST CMD: {' '.join(full)}")
-    r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    try:
+        r = subprocess.run(full, capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        log(f"ADB host command timeout after {timeout}s", level="WARN")
+        if check:
+            raise RuntimeError("ADB host command timed out")
+        return 124, ""
+
     if r.returncode != 0:
         log(r.stderr.strip(), level="ERROR")
         if check:
