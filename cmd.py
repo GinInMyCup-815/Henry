@@ -1,11 +1,12 @@
-from utils_tv import adb, log, ensure_connected, isOnlineTV, get_state, set_state, wake_up
-from config_tv import KEY, SINGLE_KEYS, HDMI, IVI_ACTIVITY
 import time
-from subprocess import run
+from utils_tv import adb, log, ensure_ready_for_command, get_state, run_wol_tv, ensure_adb_connected, TV_STATES
+from config_tv import KEY, SINGLE_KEYS, HDMI, IVI_ACTIVITY
+
 
 def send_key(key, delay=0.15):
     adb(f"shell input keyevent {key}")
     time.sleep(delay)
+
 
 def send_seq(seq):
     for key, delay in seq:
@@ -13,9 +14,9 @@ def send_seq(seq):
         time.sleep(delay)
 
 
-
 def tv_source(name):
     adb(f"shell am start -n {HDMI[name]} -f 0x20000000")
+
 
 def launch_ivi():
     adb("shell am force-stop ru.ivi.client")
@@ -28,32 +29,47 @@ def launch_ivi():
         (KEY["OK"], 0.1),
     ])
 
+
 def reboot():
-    run(["adb", "shell", "input", "keyevent", "--longpress", str(KEY["POWER"])])
+    adb(f"shell input keyevent --longpress {KEY['POWER']}")
     send_key(KEY["DOWN"], 0.1)
     send_key(KEY["OK"], 0.1)
 
+
 def power():
-    if not ensure_connected():
-        log("TV offline, sending WOL before power toggle", level="WARN")
-        run(["python3", "/home/pi/scripts/wol.py", "tv"])
-        time.sleep(6)  # Ждем включения
-        if not ensure_connected():
-            log("TV still offline after WOL", level="ERROR")
-            return "off"
-    run(["adb", "shell", "input", "keyevent", "--longpress", str(KEY["POWER"])])
-    send_key(KEY["OK"], 0.1)
-    return get_state()
+    """
+    OFF -> turn ON via WOL + WAKEUP.
+    AWAKE/SCREENSAVER -> open power menu and confirm OFF.
+    """
+    state = get_state()
+    log(f"Power command from state: {state}")
+
+    if state == TV_STATES["OFF"]:
+        run_wol_tv()
+        time.sleep(5)
+        if not ensure_adb_connected(timeout_total=15, interval=1):
+            log("TV did not come online after WOL", level="ERROR")
+            return TV_STATES["OFF"]
+        send_key(KEY["WAKEUP"], 0.1)
+        return TV_STATES["AWAKE"]
+
+    if state in (TV_STATES["AWAKE"], TV_STATES["SCREENSAVER"]):
+        adb(f"shell input keyevent --longpress {KEY['POWER']}")
+        send_key(KEY["OK"], 0.1)
+        # Do not probe with WOL here to avoid accidental re-enable after shutdown.
+        return TV_STATES["OFF"]
+
+    log("Unknown TV state for power()", level="ERROR")
+    return TV_STATES["UNKNOWN"]
+
 
 def handle_command(cmd):
     if cmd == "power":
         return power()
 
-    if not ensure_connected():
-        log(f"TV offline, skip '{cmd}'", level="WARN")
+    if not ensure_ready_for_command():
+        log(f"TV is not ready, skip '{cmd}'", level="WARN")
         return
-
-    wake_up()
 
     if cmd in SINGLE_KEYS:
         send_key(SINGLE_KEYS[cmd])
